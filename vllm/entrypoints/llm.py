@@ -50,6 +50,8 @@ class LLM:
     ) -> None:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+        if 'nvgpt' in model:
+            tokenizer_mode = "slow"
         engine_args = EngineArgs(
             model=model,
             tokenizer=tokenizer,

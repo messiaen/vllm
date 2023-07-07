@@ -6,7 +6,7 @@ from transformers import NVGPTConfig
 from torch import Tensor, Size
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PagedAttention
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -18,6 +18,8 @@ from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+from einops import rearrange
+from torch import einsum
 
 _shape_t = Union[int, List[int], Size]
 class NVGPTLayerNorm1P(torch.nn.LayerNorm):
@@ -45,8 +47,10 @@ class NVGPTMLP(torch.nn.Module):
         self.dense_4h_to_h = RowParallelLinear(config.ffn_hidden_size, config.hidden_size, bias=config.bias, input_is_parallel=True, perform_initialization=False)        
         self.activation_func = SiluAndMul()
 
-    def forward(self, x):        
-        intermediate_parallel, _ = self.dense_h_to_4h(x)                
+    def forward(self, x):
+        #print(f'input: {x.shape}\t\tweight: {self.dense_h_to_4h.weight.shape}')
+        intermediate_parallel, _ = self.dense_h_to_4h(x)
+        #print(f'intermediate:{intermediate_parallel.shape}\t\tx: {x.shape}')
         x = self.activation_func(intermediate_parallel)
         x, _ = self.dense_4h_to_h(x)
         return x
@@ -95,7 +99,7 @@ class NVGPTAttention(torch.nn.Module):
                                            self.hidden_size_per_attention_head,
                                            self.scaling,
                                            rotary_dim=rotary_dim)
-
+                
     def forward(
         self,
         positions: torch.Tensor,
@@ -105,10 +109,22 @@ class NVGPTAttention(torch.nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
-        q, k, v = qkv.chunk(chunks=3, dim=-1)
+        
+        new_tensor_shape = qkv.size()[:-1] + (
+            self.num_attention_heads,
+            3 * self.hidden_size_per_attention_head,
+        )
+
+        qkv = qkv.view(*new_tensor_shape)
+
+        # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
+        q, k, v = torch.chunk(qkv, 3, dim=-1)        
+        
+        # Flatten 
+        q, k, v = [x.reshape(-1, self.num_attention_heads * self.hidden_size_per_attention_head).contiguous() for x in [q,k,v]]
+
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(positions, q, k, v, k_cache, v_cache, input_metadata, cache_event)        
         output, _ = self.dense(attn_output)
         return output
 
@@ -174,9 +190,10 @@ class NVGPTModel(torch.nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> torch.Tensor:
+    ) -> torch.Tensor:      
         hidden_states = self.embedding(input_ids)
         for i in range(len(self.layers)):
+
             if cache_events is None:
                 cache_event = None
             else:
@@ -260,7 +277,7 @@ class NVGPTForCausalLM(torch.nn.Module):
                     loaded_weight = loaded_weight.reshape(-1)
                 else:
                     raise ValueError(f"Unexpected parameter name {name}")
-
+            
             param = state_dict[name]
 
             load_tensor_parallel_weights(param, loaded_weight, name,

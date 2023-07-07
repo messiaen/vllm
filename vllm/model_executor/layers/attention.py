@@ -269,6 +269,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
+        
         pos_encoding_ops.rotary_embedding_neox(
             positions,
             query,
@@ -276,6 +277,7 @@ class PagedAttentionWithRoPE(PagedAttention):
             self.head_size,
             self.cos_sin_cache,
         )
+
         return super().forward(
             query,
             key,
