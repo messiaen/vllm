@@ -10,3 +10,4 @@ fastapi
 uvicorn
 pydantic  # Required for OpenAI server.
 fschat  # Required for OpenAI ChatCompletion Endpoint.
+einops # Required for NVGPT
