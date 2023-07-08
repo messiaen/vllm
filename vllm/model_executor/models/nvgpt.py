@@ -108,20 +108,10 @@ class NVGPTAttention(torch.nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv, _ = self.query_key_value(hidden_states)
-        
-        new_tensor_shape = qkv.size()[:-1] + (
-            self.num_attention_heads,
-            3 * self.hidden_size_per_attention_head,
-        )
-
-        qkv = qkv.view(*new_tensor_shape)
+        qkv, _ = self.query_key_value(hidden_states)        
 
         # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
-        q, k, v = torch.chunk(qkv, 3, dim=-1)        
-        
-        # Flatten 
-        q, k, v = [x.reshape(-1, self.num_attention_heads * self.hidden_size_per_attention_head).contiguous() for x in [q,k,v]]
+        q, k, v = torch.chunk(qkv, 3, dim=-1)          
 
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache, input_metadata, cache_event)        
@@ -251,34 +241,26 @@ class NVGPTForCausalLM(torch.nn.Module):
                 model_name_or_path, cache_dir, use_np_cache):
             if "rotary_pos_emb.inv_freq" in name:
                 continue
-            
-            # For the fused QKV linear layer, manually shard the weights.
-            if "query_key_value"  in name:
-                # NVGPT's fused QKV has the shape of
-                # [3 * num_heads * head_size, hidden_size].
-                # When tensor parallelism is used, we shard the weights along
-                # the head dimension.
-                total_num_heads = self.config.num_attention_heads
-                hidden_size = self.config.hidden_size
-                head_size = hidden_size // total_num_heads
-                num_heads = total_num_heads // tensor_model_parallel_world_size
-                head_start = tensor_model_parallel_rank * num_heads
-                head_end = (tensor_model_parallel_rank + 1) * num_heads
 
-                if name.endswith(".weight"):
-                    loaded_weight = loaded_weight.view(3, total_num_heads,
-                                                       head_size, hidden_size)
-                    loaded_weight = loaded_weight[:, head_start:head_end, :, :]
-                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif name.endswith(".bias"):
-                    loaded_weight = loaded_weight.view(3, total_num_heads,
-                                                       head_size)
-                    loaded_weight = loaded_weight[:, head_start:head_end, :]
-                    loaded_weight = loaded_weight.reshape(-1)
-                else:
-                    raise ValueError(f"Unexpected parameter name {name}")
-            
             param = state_dict[name]
+            if "query_key_value" in name:
+                # NVGPT's fused QKV has the shape of
+                # [num_heads * 3 * head_size, hidden_size], while the
+                # required shape is [3 * num_heads * head_size, hidden_size].
+                # Thus, we need weight conversion.
+
+                shard_size = param.shape[0]
+                start = shard_size * tensor_model_parallel_rank
+                end = shard_size * (tensor_model_parallel_rank + 1)
+                loaded_weight = loaded_weight[start:end]
+
+                num_heads = self.config.num_attention_heads
+                hidden_size = self.config.hidden_size
+                head_size = hidden_size // num_heads
+
+                loaded_weight = loaded_weight.view(-1, 3, head_size, hidden_size)
+                loaded_weight = loaded_weight.transpose(0, 1)
+                loaded_weight = loaded_weight.reshape(-1, hidden_size)                  
 
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
