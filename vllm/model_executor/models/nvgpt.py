@@ -226,7 +226,7 @@ class NVGPTForCausalLM(torch.nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["embedding.weight", "lm_head.weight", "query_key_value.weight","dense_h_to_4h.weight"]
+    _column_parallel_weights = ["embedding.weight", "lm_head.weight", "dense_h_to_4h.weight"]
     _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
 
     def load_weights(self,
