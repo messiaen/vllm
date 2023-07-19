@@ -243,6 +243,17 @@ class NVGPTForCausalLM(torch.nn.Module):
                 continue
 
             param = state_dict[name]
+            if "dense_h_to_4h" in name:
+                shard_size = param.shape[0]
+                start = shard_size * tensor_model_parallel_rank
+                end = shard_size * (tensor_model_parallel_rank + 1)
+
+                dout, din = loaded_weight.size()
+
+                loaded_weight = loaded_weight.view(2, tensor_model_parallel_world_size, -1, din)
+                loaded_weight = loaded_weight.transpose(0,1)
+                loaded_weight = loaded_weight.reshape(dout, din)
+              
             if "query_key_value" in name:
                 # NVGPT's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
