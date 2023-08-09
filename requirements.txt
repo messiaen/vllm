@@ -4,7 +4,7 @@ ray
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch >= 2.0.0
-transformers @ git+https://github.com/ertkonuk/transformers.git@v428  # Required for LLaMA.
+transformers @ git+https://github.com/ertkonuk/transformers.git  # Required for NVGPT.
 xformers >= 0.0.19
 fastapi
 uvicorn
