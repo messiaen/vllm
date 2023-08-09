@@ -10,7 +10,6 @@ logger = init_logger(__name__)
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
-
 def get_tokenizer(
     tokenizer_name: str,
     *args,
@@ -59,6 +58,13 @@ def get_tokenizer(
         else:
             raise e
 
+    if "nvgpt" in tokenizer_name.lower() and kwargs.get("use_fast", True):
+        logger.info(
+            "For the NVGPT-based models, initializing the fast tokenizer may "
+            "cause errors. Switching to the original tokenizer.")
+        kwargs["use_fast"] = False
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args, **kwargs)
+    
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
