@@ -421,3 +421,173 @@ class PagedAttentionWithALiBi(PagedAttention):
             input_metadata.max_context_len,
             self.alibi_slopes,
         )
+
+class PagedAttentionWithLinearlyScaledRoPE(PagedAttention):
+    """PagedAttention rotary embedding extended with dynamic NTK scaling."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        rotary_dim: int,
+        max_position: int = 16384,
+        base: int = 10000,
+        rope_scaling_factor: float = 4.0,    # alpha_value
+    ) -> None:
+        super().__init__(num_heads, head_size, scale)
+
+        self.scaling_factor = rope_scaling_factor
+        self.max_seq_len_cached = max_position
+
+        # Create the cos and sin cache.
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
+        t = torch.arange(max_position).float()
+        t *= 1 / (rope_scaling_factor)
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model.
+        # TODO(woosuk): Make it more robust.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        # Embedding size: [max_position, rotary_dim]
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
+        """ PagedAttention forward pass with rotary embedding.
+
+        Args:
+            positions: shape = [num_tokens]
+                        query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_heads * head_size]
+            value: shape = [num_tokens, num_heads * head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            input_metadata: metadata for paged attention.
+            cache_event: event to wait for the cache operations to finish.
+
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+
+        # Apply rotary embedding to the query and key before passing them
+        # to the attention op.
+        pos_encoding_ops.rotary_embedding_neox(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+        )
+
+        return super().forward(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            input_metadata,
+            cache_event,
+        )
+
+
+class PagedAttentionWithNTKawareScaledRoPE(PagedAttention):
+    """PagedAttention rotary embedding extended with dynamic NTK scaling."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        rotary_dim: int,
+        max_position: int = 16384,
+        base: int = 10000,
+        rope_scaling_factor: float = 4.0,    # alpha_value
+    ) -> None:
+        super().__init__(num_heads, head_size, scale)
+
+        self.scaling_factor = rope_scaling_factor
+        self.max_seq_len_cached = max_position
+        
+        # NTK-aware scaling of the base
+        base = base * rope_scaling_factor ** (rotary_dim / (rotary_dim-2)) 
+
+        # Create the cos and sin cache.
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
+        t = torch.arange(max_position).float()
+        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model.
+        # TODO(woosuk): Make it more robust.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        # Embedding size: [max_position, rotary_dim]
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
+        """ PagedAttention forward pass with rotary embedding.
+
+        Args:
+            positions: shape = [num_tokens]
+                        query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_heads * head_size]
+            value: shape = [num_tokens, num_heads * head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            input_metadata: metadata for paged attention.
+            cache_event: event to wait for the cache operations to finish.
+
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+
+        # Apply rotary embedding to the query and key before passing them
+        # to the attention op.
+        pos_encoding_ops.rotary_embedding_neox(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+        )
+
+        return super().forward(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            input_metadata,
+            cache_event,
+        )

@@ -6,7 +6,7 @@ from transformers import NVGPTConfig
 from torch import Tensor, Size
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PagedAttention
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PagedAttentionWithLinearlyScaledRoPE, PagedAttentionWithNTKawareScaledRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -95,10 +95,11 @@ class NVGPTAttention(torch.nn.Module):
         if config.rotary_percentage < 1:
             rotary_dim = int(rotary_dim * config.rotary_percentage)
 
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.hidden_size_per_attention_head,
-                                           self.scaling,
-                                           rotary_dim=rotary_dim)
+        self.attn = PagedAttentionWithNTKawareScaledRoPE(self.num_heads,
+                                                           self.hidden_size_per_attention_head,
+                                                           self.scaling,
+                                                           rotary_dim=rotary_dim,
+                                                           rope_scaling_factor = 4.0)
                 
     def forward(
         self,
@@ -204,6 +205,7 @@ class NVGPTForCausalLM(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+
         self.model = NVGPTModel(config)
         self.lm_head = ColumnParallelLinear(config.hidden_size,
                                             config.vocab_size,
